@@ -15,7 +15,7 @@ include_directories(${Boost_INCUDE_DIRS})
 # and example DeviceAdapters
 include_directories("${PROJECT_SOURCE_DIR}/MMCore")
 add_subdirectory(MMCore)
-#add_subdirectory(MMDevice)
+add_subdirectory(MMDevice)
 # TODO Make SimpleAutoFocus DeviceAdapter include
 # ${PROJECT_SOURCE_DIR}/Util
 #add_subdirectory(DeviceAdapters)
