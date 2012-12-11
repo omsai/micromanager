@@ -44,6 +44,7 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <string.h>
+#include <unistd.h>
 #include <errno.h>
 #endif // linux
 
