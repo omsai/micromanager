@@ -23,8 +23,8 @@ add_subdirectory(MMDevice)
 ## Bindings
 if(USE_SWIG_BINDINGS)
   find_package(SWIG REQUIRED)
-#  add_subdirectory(MMCoreJ_wrap)
-#  add_subdirectory(MMCorePy_wrap)
+  add_subdirectory(MMCoreJ_wrap)
+  add_subdirectory(MMCorePy_wrap)
 endif()
 
 ## Documentation

@@ -37,6 +37,7 @@
 %include std_vector.i
 %include std_map.i
 %include std_pair.i
+%include <attribute.i>
 %include "typemaps.i"
 
 
@@ -49,8 +50,8 @@ import_array();
 %}
 
 %{
-#include "arrayobject.h"
-#include "string.h"
+#include "numpy/arrayobject.h"
+//#include "string.h"
 %}
 
 
@@ -169,10 +170,8 @@ import_array();
 
 // Extend exception objects to return the exception object message in python.
 // __str__ method gets printed in the traceback, so it should contain the core error message string.
-
+%attributestring(CMMError, std::string, message, getMsg );
 %extend CMMError {
-  std::string const message;
-  
   std::string __getitem__(int n) {
 	return $self->getMsg();
   }
@@ -183,9 +182,8 @@ import_array();
 
 }
 
+%attributestring(MetadataKeyError, std::string, message, getMsg );
 %extend MetadataKeyError {
-  std::string const message;
-  
   std::string __getitem__(int n) {
 	return $self->getMsg();
   }
@@ -197,9 +195,8 @@ import_array();
 }
 
 
+%attributestring(MetadataIndexError, std::string, message, getMsg );
 %extend MetadataIndexError {
-  std::string const message;
-  
   std::string __getitem__(int n) {
 	return $self->getMsg();
   }
@@ -209,24 +206,6 @@ import_array();
   }
 
 }
-
-
-%{
-std::string const CMMError_message_get(CMMError * err) {
-	return err->getMsg();
-}
-
-std::string const MetadataKeyError_message_get(MetadataKeyError * err) {
-	return err->getMsg();
-}
-
-std::string const MetadataIndexError_message_get(MetadataIndexError * err) {
-	return err->getMsg();
-}
-
-%}
-
-
 
 
 // instantiate STL mappings
