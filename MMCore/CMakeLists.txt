@@ -12,7 +12,7 @@ set( MMCore_SOURCES
   )
 
 add_library(MMCore SHARED ${MMCore_SOURCES} )
-target_link_libraries( MMCore dl z ${Boost_LIBRARIES} )
+target_link_libraries( MMCore MMDevice dl z ${Boost_LIBRARIES} )
 
 if( APPLE )
 find_library( FRAMEWORK_CoreFoundation CoreFoundation )

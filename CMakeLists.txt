@@ -14,8 +14,8 @@ include_directories(${Boost_INCLUDE_DIR})
 # Top-level include since MMCore is used by bindings, DeviceAdapters,
 # and example DeviceAdapters
 include_directories("${PROJECT_SOURCE_DIR}/MMCore")
-add_subdirectory(MMCore)
 add_subdirectory(MMDevice)
+add_subdirectory(MMCore)
 # TODO Make SimpleAutoFocus DeviceAdapter include
 # ${PROJECT_SOURCE_DIR}/Util
 #add_subdirectory(DeviceAdapters)

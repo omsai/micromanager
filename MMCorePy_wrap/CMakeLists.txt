@@ -21,8 +21,8 @@ if( NOT PYTHON_NUMPY_PATH )
 endif()
 
 if( PYTHON_NUMPY_PATH )
-	if( EXISTS ${PYTHON_NUMPY_PATH}/core/include/numpy/arrayobject.h )
-		set( PYTHON_NUMPY_INCLUDE ${PYTHON_NUMPY_PATH}/core/include/ CACHE PATH "Path to numpy include directories" )
+	if( EXISTS ${PYTHON_NUMPY_PATH}/core/include/numpy/arrayobject.h AND NOT PYTHON_NUMPY_INCLUDE )
+		set( PYTHON_NUMPY_INCLUDE ${PYTHON_NUMPY_PATH}/core/include/ CACHE PATH "Path to numpy include directories" FORCE )
 	endif()
 endif()
 
@@ -36,3 +36,7 @@ set_source_files_properties( MMCorePy.i PROPERTIES CPLUSPLUS ON )
 set( SWIG_MODULE_MMCorePy_EXTRA_DEPS MMCore )
 swig_add_module( MMCorePy python MMCorePy.i )
 swig_link_libraries( MMCorePy MMCore MMDevice )
+
+if( APPLE )
+  swig_link_libraries( MMCorePy -Wl,-undefined,dynamic_lookup )
+endif()
