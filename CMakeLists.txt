@@ -10,7 +10,7 @@ set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost REQUIRED COMPONENTS date_time exception system thread)
 # Top-level include since Boost is also used by DeviceAdapters
-include_directories(${Boost_INCUDE_DIRS})
+include_directories(${Boost_INCLUDE_DIR})
 # Top-level include since MMCore is used by bindings, DeviceAdapters,
 # and example DeviceAdapters
 include_directories("${PROJECT_SOURCE_DIR}/MMCore")
