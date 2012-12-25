@@ -518,8 +518,8 @@ namespace MM {
       virtual void GetTags(char* serializedMetadata) = 0;
       /*
        * Returns whether a camera's exposure time can be sequenced.
-       * If returning true, then a Camera adapter class should also inherit
-       * the SequenceableExposure class and implement its methods.
+       * If returning true, then the Camera adapter class should also
+       * implement the Sequence functions below.
        */
       virtual int IsExposureSequenceable(bool& isSequenceable) const = 0;
 
