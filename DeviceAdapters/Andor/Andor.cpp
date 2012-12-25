@@ -1,4 +1,4 @@
-///////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 // FILE:          Andor.cpp
 // PROJECT:       Micro-Manager
 // SUBSYSTEM:     DeviceAdapters
@@ -214,6 +214,8 @@ OutputAmplifierIndex_(0),
 HSSpeedIdx_(0),
 PreAmpGainIdx_(0),
 bSoftwareTriggerSupported_(0),
+bRingOfExposuresSupported_(0),
+maxRingExposures_(0),
 maxTemp_(0),
 myCameraID_(-1),
 pImgBuffer_(0),
@@ -777,6 +779,8 @@ int AndorCamera::GetListOfAvailableCameras()
          nRet = SetProperty(MM::g_Keyword_Exposure,"10.0");
          assert(nRet == DEVICE_OK);
       }
+      if (bSoftwareTriggerSupported_)
+	 fExposureSequence_.clear();
 
       int InternalShutter;
       ret = IsInternalMechanicalShutter(&InternalShutter);
@@ -1758,6 +1762,103 @@ int AndorCamera::GetListOfAvailableCameras()
       return DEVICE_OK;
    }
 
+   int AndorCamera::IsExposureSequenceable(bool& isSequenceable) const
+   {
+      isSequenceable = bRingOfExposuresSupported_;
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::GetExposureSequenceMaxLength(long& nrEvents) const
+   {
+      nrEvents = (long)maxRingExposures_;
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::StartExposureSequence() const
+   {
+      // Andor SDK has no way of explicitly setting the active
+      // exposure pointer for its ring buffer.  To reset the pointer
+      // position one has to resend the sequence:
+      SendExposureSequence();
+   }
+
+   int AndorCamera::StopExposureSequence() const
+   {
+      unsigned int ret;
+
+      // The first ring exposure on the camera head is sync'd to the
+      // current exposure of the camera.  Thus stopping the ring
+      // on the head with SetRingExposureTimes requires setting the
+      // camera to a new exposure time:
+
+      // REVIEW Option 1: Reset to the current Core exposure time-
+      double expMS;		// REVIEW use expMS_ instead?
+      expMS = GetExposure();
+      float exp;
+      exp = (float)(expMS / 1000.0);
+      ret = SetRingExposureTimes(1, &exp);
+      if (ret != DRV_SUCCESS)
+	 return ret;
+
+      // REVIEW Option 2: Reset to the first exposure time in the
+      // ring-
+      // if (fExposureSequence_.size() == 0)
+      // 	 return DEVICE_OK;	// nothing needs to be done
+      // ret = SetRingExposureTimes(1, fExposureSequence_[0]);
+
+      // REVIEW Option 3: Reset to the exposure saved before loading
+      // the ExposureSequence- I worry that caching an exposure before
+      // setting up a sequence is complex and error prone, but this
+      // may be expected behavior.  What do you think?  TODO add code
+      // if this is the best implementation.
+
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::ClearExposureSequence()
+   {
+      int nRet;
+      nRet = StopExposureSequence();
+      if (nRet != DEVICE_OK)
+	 return nRet;
+      fExposureSequence_.clear();
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::AddToExposureSequence(double exposureTime_ms)
+   {
+      // REVIEW it seems no verification is being done on the exposure
+      // times.  Even through we are sending an exposure time to the
+      // camera, it's possible that the real exposure the camera uses
+      // is different (e.g. if the camera has overlap mode on).  Not
+      // reading back the real exposure creates invalid exposure time
+      // metadata, and can mislead the user.  Where should the
+      // exposure be verified?  Should AddToExposureSequence have a
+      // second parameter &actualExposureTime_ms?  The Andor function
+      // GetAdjustedRingExposureTimes() does the verification.
+
+      // REVIEW some check should be done that AddToExposureSequence
+      // is not being called after reaching
+      // ExposureSequenceMaxLength.  Where is this being done right
+      // now?  I don't think it makes sense to do it here.
+      fExposureSequence_.push_back((float)(exposureTime_ms / 1000.0));
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::SendExposureSequence() const
+   {
+      if (fExposureSequence_.size() == 0)
+	 return DEVICE_OK;	// nothing needs to be done
+
+      unsigned int ret;
+      const float* seq = &fExposureSequence_[0];
+      ret = SetRingExposureTimes((int)fExposureSequence_.size(), seq);
+      if (ret != DRV_SUCCESS) {
+	 LogMessage("SendExposureSequence() failed");
+	 return ret;
+      }
+      return DEVICE_OK;
+   }
 
    ///////////////////////////////////////////////////////////////////////////////
    // Action handlers
@@ -4546,7 +4647,17 @@ unsigned int AndorCamera::createIsolatedCropModeProperty(AndorCapabilities * cap
          }
          vTriggerModes.push_back("Software");
          bSoftwareTriggerSupported_ = true;
+	 int number;
+	 retVal = GetMaximumNumberRingExposureTimes(&number);
+	 if (retVal == DRV_SUCCESS) {
+	    bRingOfExposuresSupported_ = true;
+	    maxRingExposures_ = number;
+	 }
+	 else if (retVal == DRV_NOT_SUPPORTED) {
+	    LogMessage("Exposure sequencing not supported");
+	 }
       }
+
       if(caps->ulTriggerModes & AC_TRIGGERMODE_EXTERNAL) {
          if(iCurrentTriggerMode_ == EXTERNAL) {
             retVal = SetTriggerMode(1);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software

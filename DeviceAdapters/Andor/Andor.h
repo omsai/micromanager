@@ -97,7 +97,13 @@ public:
    int SetROI(unsigned uX, unsigned uY, unsigned uXSize, unsigned uYSize); 
    int GetROI(unsigned& uX, unsigned& uY, unsigned& uXSize, unsigned& uYSize);
    int ClearROI();
-   int IsExposureSequenceable(bool& isSequenceable) const {isSequenceable = false; return DEVICE_OK;}
+   int IsExposureSequenceable(bool& isSequenceable) const;
+   int GetExposureSequenceMaxLength(long& nrEvents) const;
+   int StartExposureSequence() const;
+   int StopExposureSequence() const;
+   int ClearExposureSequence();
+   int AddToExposureSequence(double exposureTime_ms);
+   int SendExposureSequence() const;
 
    // high-speed interface
    int PrepareSequenceAcqusition()
@@ -296,6 +302,10 @@ private:
 	   EXTERNAL,
 	   SOFTWARE
    };
+
+   bool bRingOfExposuresSupported_;
+   int maxRingExposures_;
+   std::vector<float> fExposureSequence_;
 
    at_32 myCameraID_;
    at_32 NumberOfAvailableCameras_;
