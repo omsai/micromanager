@@ -3,6 +3,7 @@ find_package( SWIG REQUIRED )
 include( ${SWIG_USE_FILE} )
 
 find_package( Java REQUIRED )
+include( UseJava )
 
 # Discover JNI path
 if( NOT JDK_PATH )
@@ -22,5 +23,6 @@ include_directories( ${JDK_INCLUDE} ${JDK_PLATFORM_INCLUDE} )
 
 set_source_files_properties( MMCoreJ.i PROPERTIES CPLUSPLUS ON )
 set( SWIG_MODULE_MMCoreJ_EXTRA_DEPS MMCore )
-swig_add_module( MMCoreJ java MMCoreJ.i )
-swig_link_libraries( MMCoreJ MMCore MMDevice )
+swig_add_module( MMCoreJ_wrap java MMCoreJ.i )
+swig_link_libraries( MMCoreJ_wrap MMCore MMDevice )
+add_jar( MMCoreJ TaggedImage.java *.java ../mmstudio/src/org/json/*.java )
