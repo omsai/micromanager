@@ -97,9 +97,31 @@
                                   (when-not (identical? last-val current-val)
                                     (function last-val current-val))
                                   current-val)
-                                (catch Throwable t (do (def t1 t) (println t) (throw t))))))))))
+                                (catch Throwable t (do (.printStackTrace t)
+                                                       (def t1 t)
+                                                       (println t)
+                                                       (throw t))))))))))
   ([reference function]
-    (handle-update reference function (agent @reference))))
+    (let [agent0 (agent @reference)]
+      (def agent1 agent0)
+      (handle-update reference function agent0))))
+
+(defn handle-update-on-change
+  "Like handle-update, but only runs the function
+   when valuation-fn applied to the reference's value
+   has changed."
+  ([reference function valuation-fn agent]
+    (handle-update reference
+                   (fn [last-val current-val]
+                     (println (valuation-fn last-val)
+                              (valuation-fn current-val))
+                     (when-not (= (valuation-fn last-val)
+                                  (valuation-fn current-val))
+                       (function last-val current-val)))
+                   agent))
+  ([reference function valuation-fn]
+    (handle-update-on-change function valuation-fn
+                             (agent @reference))))
 
 (defn handle-update-added-items
   "Attempts to run a function whenever there are new items in reference.

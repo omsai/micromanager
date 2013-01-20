@@ -1,7 +1,7 @@
 (ns slide-explorer.paint
   (:import (java.awt Graphics Graphics2D RenderingHints)
            (org.micromanager.utils GUIUpdater))
-  (:use [slide-explorer.reactive :only (add-watch-simple)]))
+  (:require [slide-explorer.reactive :as reactive]))
 
 (defn enable-anti-aliasing
   "Turn on (off) anti-aliasing for a graphics context."
@@ -37,20 +37,14 @@
   [^Graphics2D g image x y]
   (.drawImage g image x y nil))
 
-(def display-updater (GUIUpdater.))
-
-
-(defn repaint
-  "Repaint the panel on the GUI Updater thread."
-  [panel]
-  (.post display-updater #(.repaint panel)))
-
 (defn repaint-on-change 
   "Adds a watch such that panel is repainted whenever
    the values in reference have changed."
   [panel references]
   (doseq [reference references]
-    (add-watch-simple reference
+    (reactive/add-watch-simple reference
       (fn [old-state new-state]
         (when-not (identical? old-state new-state)
-          (repaint panel))))))
+          ;(println (meta reference))
+          ;(Thread/sleep 60)
+          (.repaint panel))))))

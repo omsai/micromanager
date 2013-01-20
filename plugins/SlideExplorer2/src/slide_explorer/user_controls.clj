@@ -1,8 +1,12 @@
 (ns slide-explorer.user-controls
   (:import (java.awt.event ComponentAdapter KeyEvent KeyAdapter
-                           MouseAdapter WindowAdapter)
-           (javax.swing AbstractAction JComponent KeyStroke)
-           (java.util UUID)))
+                           MouseAdapter MouseEvent WindowAdapter
+                           ActionListener)
+           (java.awt Window)
+           (javax.swing AbstractAction JComponent KeyStroke SwingUtilities
+                        JButton)
+           (java.util UUID)
+           (org.micromanager.utils JavaUtils)))
 
 (def MIN-ZOOM 1/256)
 
@@ -14,6 +18,15 @@
   (tree-seq (constantly true)
             #(.getComponents %)
             window))
+
+;; widgets
+
+(defn button [text press-fn]
+  (doto (JButton. text)
+    (.addActionListener
+      (proxy [ActionListener] []
+        (actionPerformed [e]
+                         (press-fn))))))
 
 ;; key binding
 
@@ -44,40 +57,81 @@
 
 ;; full screen
 
-(defn- default-screen-device [] ; borrowed from see-saw
-  (->
-    (java.awt.GraphicsEnvironment/getLocalGraphicsEnvironment)
-    .getDefaultScreenDevice))
+(defn- screen-devices []
+  (seq (.. java.awt.GraphicsEnvironment
+      getLocalGraphicsEnvironment
+      getScreenDevices)))
+
+(defn- screen-bounds [screen]
+  (.. screen getDefaultConfiguration getBounds))
+
+(defn- overlap-area [rect1 rect2]
+  (let [intersection (.intersection rect1 rect2)]
+    (* (.height intersection) (.width intersection))))
+
+(defn- window-screen [window]
+  (when window
+    (let [window-bounds (.getBounds window)
+          screens (screen-devices)]
+      (apply max-key #(overlap-area window-bounds
+                                    (screen-bounds %)) screens))))
+
+(def old-bounds (atom {}))
 
 (defn full-screen!
   "Make the given window/frame full-screen. Pass nil to return all windows
 to normal size."
-  ([^java.awt.GraphicsDevice device window]
-    (if window
-      (when (not= (.getFullScreenWindow device) window)
-        (.dispose window)
-        (.setUndecorated window true)
-        (.setFullScreenWindow device window)
-        (.show window))
-      (when-let [window (.getFullScreenWindow device)]
-        (.dispose window)
-        (.setFullScreenWindow device nil)
-        (.setUndecorated window false)
-        (.show window)))
-    window)
-  ([window]
-    (full-screen! (default-screen-device) window)))
+  [window]
+  (when window
+    (when-not (@old-bounds window)
+      (swap! old-bounds assoc window (.getBounds window)))
+    (.dispose window)
+    (.setUndecorated window true)
+    (let [screen (window-screen window)]
+      (if (JavaUtils/isMac)
+        (.setFullScreenWindow screen window)
+        (.setBounds window (screen-bounds screen))))
+    (.repaint window)
+    (.show window)))
+
+(defn exit-full-screen!
+  [window]
+  (when window
+    (.dispose window)
+    (.setUndecorated window false)
+    (when (JavaUtils/isMac)
+      (.setFullScreenWindow (window-screen window) nil))
+    (when-let [bounds (@old-bounds window)]
+      (.setBounds window bounds)
+      (swap! old-bounds assoc window nil))
+    (.repaint window)
+    (.show window)))
 
 (defn setup-fullscreen [window]
   (bind-window-keys window ["F"] #(full-screen! window))
-  (bind-window-keys window ["ESCAPE"] #(full-screen! nil)))
+  (bind-window-keys window ["ESCAPE"] #(exit-full-screen! window)))
+
+;; window positioning
+
+(defn show-window-center
+  ([window width height parent-window]
+    (let [bounds (screen-bounds
+                   (or (window-screen parent-window)
+                       (first (screen-devices))))
+          x (+ (.x bounds) (/ (- (.width bounds) width) 2))
+          y (+ (.y bounds) (/ (- (.height bounds) height) 2))]
+      (doto window
+        (.setBounds x y width height)
+        .show)))
+  ([window width height]
+    (show-window-center window width height nil)))
 
 ;; other user controls
 
 (defn pan! [position-atom axis distance]
-  (let [zoom (@position-atom :zoom)]
+  (let [{:keys [zoom scale]} @position-atom]
     (swap! position-atom update-in [axis]
-           - (/ distance zoom))))
+           - (/ distance zoom scale))))
 
 (defn handle-drags [component position-atom]
   (let [drag-origin (atom nil)
@@ -97,14 +151,42 @@ to normal size."
       (.addMouseMotionListener mouse-adapter))
     position-atom))
 
-(defn handle-arrow-pan [component position-atom dist]
-  (let [binder (fn [key axis step]
+(def PAN-STEP-COUNT 10)
+(def PAN-DISTANCE 50)
+
+;TODO :: rewrite with a smoother algorithm (don't rely on key repeats)
+(defn run-pan!
+  [position-atom axis direction]
+  (when-not (:panning @position-atom)
+    (future
+      (swap! position-atom assoc :panning true)
+      (let [step-size (direction (/ PAN-DISTANCE PAN-STEP-COUNT))]
+        (dotimes [_ PAN-STEP-COUNT]
+          (pan! position-atom axis step-size)
+          (Thread/sleep 5)))
+      (swap! position-atom assoc :panning false))))  
+
+(defn handle-arrow-pan [component position-atom]
+  (let [binder (fn [key axis direction]
                  (bind-key component key
-                           #(pan! position-atom axis step) true))]
-    (binder "UP" :y dist)
-    (binder "DOWN" :y (- dist))
-    (binder "RIGHT" :x (- dist))
-    (binder "LEFT" :x dist)))
+                           #(run-pan! position-atom axis direction) true))]
+    (binder "UP" :y +)
+    (binder "DOWN" :y -)
+    (binder "RIGHT" :x -)
+    (binder "LEFT" :x +)))
+
+(defn toggle-mode [screen-state]
+  (assoc screen-state :mode
+         (condp = (:mode screen-state)
+           :explore :navigate
+           :navigate :explore
+              :navigate)))
+
+(defn handle-mode-keys [panel screen-state-atom]
+  (let [window (SwingUtilities/getWindowAncestor panel)]
+    (bind-window-keys window [\ ] ; space bar
+                      #(swap! screen-state-atom toggle-mode))))
+                                
 
 (defn handle-wheel [component z-atom]
   (.addMouseWheelListener component
@@ -130,14 +212,33 @@ to normal size."
   (bind-window-keys window ["COMMA"] #(swap! dive-atom update-in [:z] dec))
   (bind-window-keys window ["PERIOD"] #(swap! dive-atom update-in [:z] inc)))
 
-(defn handle-zoom [window zoom-atom]
-  (bind-window-keys window ["ADD" "CLOSE_BRACKET"]
-                   (fn [] (swap! zoom-atom update-in [:zoom]
-                                 #(min (* % 2) MAX-ZOOM))))
-  (bind-window-keys window ["SUBTRACT" "OPEN_BRACKET"]
-                   (fn [] (swap! zoom-atom update-in [:zoom]
-                                 #(max (/ % 2) MIN-ZOOM)))))
+(def scale-delta 0.04)
 
+(defn run-zoom! 
+  "Smoothly zoom :in or :out by one factor of 2, asynchronously."
+  [zoom-atom direction]
+  (future
+    (let [in? (= direction :in)
+          {:keys [zoom scale]} @zoom-atom
+          factor (if in? 2 1/2)]
+      (when (and (= 1 scale)
+                 (if in?
+                   (< zoom (- MAX-ZOOM 0.001))
+                   (> zoom (+ MIN-ZOOM 0.001))))
+        (doseq [scale (map #(Math/pow factor %)
+                           (range scale-delta 1 scale-delta))]
+          (swap! zoom-atom assoc :scale scale)
+          (Thread/sleep 10))
+        (swap! zoom-atom assoc
+               :scale 1
+               :zoom (* (@zoom-atom :zoom) factor))))))
+
+(defn handle-zoom [window zoom-atom]
+  (bind-window-keys window ["ADD" "CLOSE_BRACKET" "EQUALS"]
+    (fn [] (run-zoom! zoom-atom :in)))
+  (bind-window-keys window ["SUBTRACT" "OPEN_BRACKET" "MINUS"]
+    (fn [] (run-zoom! zoom-atom :out))))
+  
 (defn watch-keys [window key-atom]
   (let [key-adapter (proxy [KeyAdapter] []
                       (keyPressed [e]
@@ -153,20 +254,54 @@ to normal size."
   (swap! screen-state-atom update-in [:mouse]
          merge {:x (.getX e) :y (.getY e)}))
 
+(defn handle-click [panel event-predicate response-fn]
+  (.addMouseListener panel
+                     (proxy [MouseAdapter] []
+                       (mouseClicked [e]
+                                     (when (event-predicate e)
+                                       (response-fn (.getX e) (.getY e)))))))
+
+(defn handle-double-click [panel response-fn]
+  (handle-click panel
+                (fn [e] (and (= MouseEvent/BUTTON1 (.getButton e))
+                             (not (.isShiftDown e))
+                             (= 2 (.getClickCount e))))
+                response-fn))
+
+(defn handle-shift-click [panel response-fn]
+  (handle-click panel
+                (fn [e] (and (= MouseEvent/BUTTON1 (.getButton e))
+                             (.isShiftDown e)))
+                response-fn))
+                                     
 (defn handle-pointing [component screen-state-atom]
   (.addMouseMotionListener component
-                     (proxy [MouseAdapter] []
-                       (mouseMoved [e] (update-mouse-position e screen-state-atom))
-                       (mouseDragged [e] (update-mouse-position e screen-state-atom)))))
+    (proxy [MouseAdapter] []
+      (mouseMoved [e] (update-mouse-position e screen-state-atom))
+      (mouseDragged [e] (update-mouse-position e screen-state-atom)))))
                                    
+(defn absolute-mouse-position [screen-state]
+  (let [{:keys [x y z mouse zoom scale width height tile-dimensions]} screen-state]
+    (when mouse
+      (let [mouse-x-centered (- (mouse :x) (/ width 2))
+            mouse-y-centered (- (mouse :y) (/ height 2))
+            [w h] tile-dimensions]
+        {:x (long (+ x (/ mouse-x-centered zoom scale) (/ w -2)))
+         :y (long (+ y (/ mouse-y-centered zoom scale) (/ h -2)))
+         :z z}))))
+
+(defn handle-refresh [component]
+  (bind-keys component ["R"] #(do (.repaint component) (println "repaint")) true))
+                           
 
 ;(defn handle-open [window]
 ;  (bind-window-keys window ["S"] create-dir-dialog))
 
 (defn make-view-controllable [panel screen-state-atom]
-  (let [handle-arrow-pan-50 #(handle-arrow-pan %1 %2 50)]
-    ((juxt handle-drags handle-arrow-pan-50 handle-wheel handle-resize handle-pointing)
-           panel screen-state-atom)
-    ((juxt handle-zoom handle-dive watch-keys) (.getTopLevelAncestor panel) screen-state-atom)))
+  (handle-refresh panel)
+  ((juxt handle-drags handle-arrow-pan handle-wheel handle-resize handle-pointing)
+         panel screen-state-atom)
+  ((juxt handle-zoom handle-dive) ; watch-keys)
+         (.getTopLevelAncestor panel) screen-state-atom))
     
-  
+ 

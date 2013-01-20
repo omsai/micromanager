@@ -27,6 +27,7 @@ import java.util.logging.Logger;
 
 import org.micromanager.api.MMWindow;
 import org.micromanager.utils.MMScriptException;
+import org.micromanager.utils.ReportingUtils;
 
 /**
  *
@@ -57,7 +58,9 @@ public class FitAllThread extends GaussianInfo implements Runnable  {
    public synchronized void stop() {
       if (gfsThreads_ != null) {
          for (int i=0; i<gfsThreads_.length; i++) {
-            gfsThreads_[i].stop();
+            if (gfsThreads_[i] != null) {
+               gfsThreads_[i].stop();
+            }
          }
       }
       t_ = null;
@@ -82,8 +85,6 @@ public class FitAllThread extends GaussianInfo implements Runnable  {
          stop();
          return;
       }
-
-      //ImagePlus imp = siPlus;
 
       int nrThreads = ij.Prefs.getThreads();
          if (nrThreads > 8)
@@ -124,7 +125,30 @@ public class FitAllThread extends GaussianInfo implements Runnable  {
       long endTime = System.nanoTime();
 
       // Add data to data overview window
+      if (resultList_.size() < 1) {
+         ReportingUtils.showError("No spots found");
+         running_ = false;
+         return;
+      }
       DataCollectionForm dcForm = DataCollectionForm.getInstance();
+      
+      double zMax = resultList_.get(0).getZCenter();
+      if (zMax < 0.0) {
+         zMax = 0.0;
+      }
+      double zMin = zMax;
+      ZCalibrator zc = DataCollectionForm.zc_;
+      if (zc != null) {
+         for (GaussianSpotData spot : resultList_) {
+            double zTmp = spot.getZCenter();
+            if (zMax < zTmp) {
+               zMax = zTmp;
+            }
+            if (zMin > zTmp && zTmp > 0.0) {
+               zMin = zTmp;
+            }  
+         }
+      }
 
       dcForm.addSpotData(siPlus.getWindow().getTitle(), siPlus.getTitle(), "",
               siPlus.getWidth(), siPlus.getHeight(), (float) pixelSize_, 
@@ -132,7 +156,7 @@ public class FitAllThread extends GaussianInfo implements Runnable  {
               nrChannels, nrFrames, nrSlices, nrPositions, resultList_.size(), 
               resultList_, null, false, DataCollectionForm.Coordinates.NM, 
               DataCollectionForm.zc_.hasFitFunctions(), 
-              0.0, 0.0);
+              zMin, zMax);
       
       dcForm.setVisible(true);
 
@@ -213,7 +237,7 @@ public class FitAllThread extends GaussianInfo implements Runnable  {
                      //  may be dangerous if the user is not aware
                      RoiManager roiM = RoiManager.getInstance();
                      Roi[] rois = null;
-                     if (roiM != null) {
+                     if (roiM != null && roiM.getSelectedIndex() > -1 ) {
                         rois = roiM.getSelectedRoisAsArray();
                      }
                      if (rois != null && rois.length > 0) {

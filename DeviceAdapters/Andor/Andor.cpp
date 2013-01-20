@@ -61,7 +61,6 @@
 #include <iomanip>
 #include <math.h>
 
-
 #include <iostream>
 using namespace std;
 
@@ -78,10 +77,20 @@ const char* g_IxonName = "Ixon";
 const char* g_PixelType_8bit = "8bit";
 const char* g_PixelType_16bit = "16bit";
 
-const char* g_ShutterMode = "ShutterMode";
+const char* g_ShutterMode = "Shutter";
+const char* g_ExternalShutterMode = "Shutter (External)";
+const char* g_InternalShutterMode = "Shutter (Internal)";
+const char* g_ShutterModeOpeningTime = "Shutter Opening Time";
+const char* g_ShutterModeClosingTime = "Shutter Closing Time";
+const char* g_ShutterModeOpeningTimeInvalid = "Shutter Opening Time is Invalid";
+const char* g_ShutterModeClosingTimeInvalid = "Shutter Closing Time is Invalid";
+const char* g_ShutterModeInvalid = "Shutter Mode is Invalid";
 const char* g_ShutterMode_Auto = "Auto";
 const char* g_ShutterMode_Open = "Open";
 const char* g_ShutterMode_Closed = "Closed";
+const char* g_ShutterTTL = "Shutter TTL Value";
+const char* g_ShutterTTLHighToOpen = "High to Open";
+const char* g_ShutterTTLLowToOpen = "Low to Open";
 
 const char* g_FanMode_Full = "Full";
 const char* g_FanMode_Low = "Low";
@@ -108,10 +117,16 @@ const char* g_cropMode = "Isolated Crop Mode";
 const char* g_cropModeWidth = "Isolated Crop Width";
 const char* g_cropModeHeight = "Isolated Crop Height";
 
+const char* g_External = "External";
+const char* g_ExternalExposure = "External Exposure";
+const char* g_ExternalStart = "External Start";
+const char* g_FastExternal = "Fast External";
+const char* g_Internal = "Internal";
+const char* g_Software = "Software";
+
 // singleton instance
 AndorCamera* AndorCamera::instance_ = 0;
 unsigned int AndorCamera::refCount_ = 0;
-bool AndorCamera::softwareTriggerUsed_ = false;
 
 // global Andor driver thread lock
 MMThreadLock g_AndorDriverLock;
@@ -213,7 +228,7 @@ sequenceLength_(0),
 OutputAmplifierIndex_(0),
 HSSpeedIdx_(0),
 PreAmpGainIdx_(0),
-bSoftwareTriggerSupported_(0),
+bSoftwareTriggerSupported_(false),
 bRingOfExposuresSupported_(0),
 maxRingExposures_(0),
 maxTemp_(0),
@@ -247,39 +262,19 @@ spuriousNoiseFilterDescriptionStr_("")
    SetErrorText(ERR_CAMERA_DOES_NOT_EXIST, "No Camera Found.  Make sure it is connected and switched on, and try again.");
    SetErrorText(DRV_NO_NEW_DATA, "No new data arrived within a reasonable time.");
    SetErrorText(ERR_SOFTWARE_TRIGGER_IN_USE, "Only one camera can use software trigger."); 
+   SetErrorText(ERR_INVALID_SHUTTER_OPENTIME, g_ShutterModeOpeningTimeInvalid);
+   SetErrorText(ERR_INVALID_SHUTTER_CLOSETIME, g_ShutterModeClosingTimeInvalid);
+   SetErrorText(ERR_INVALID_SHUTTER_MODE, g_ShutterModeInvalid);
 
    seqThread_ = new AcqSequenceThread(this);
 
-   // Pre-initialization properties
-   // -----------------------------
-
-   // Driver location property removed.  atmcd32d.dll should be in the working directory
-   hAndorDll = 0;
-   fpGetKeepCleanTime = 0;
-   fpGetReadOutTime = 0;
-
-#ifdef WIN32 
-   if(hAndorDll == 0)
-      hAndorDll = ::GetModuleHandle("atmcd32d.dll");
-   if(hAndorDll!=NULL)
-   {
-      fpGetKeepCleanTime = (FPGetKeepCleanTime)GetProcAddress(hAndorDll, "GetKeepCleanTime");
-      fpGetReadOutTime = (FPGetReadOutTime)GetProcAddress(hAndorDll, "GetReadOutTime");
-   }
-#else
-   // load andor.so that interfaces with the andordrvlx kernel module on linux systems
+#ifdef __linux__
    hAndorDll = dlopen("libandor.so.2", RTLD_LAZY|RTLD_GLOBAL);
    if (!hAndorDll)
    {
       fprintf(stderr,"Failed to find libandor.so.2\n");
       exit(1);
    } 
-   else
-   {
-      fpGetKeepCleanTime = (FPGetKeepCleanTime)dlsym(hAndorDll, "GetKeepCleanTime");
-      fpGetReadOutTime = (FPGetReadOutTime)dlsym(hAndorDll, "GetReadOutTime");
-   }
-   // this needs to be initialized for Linux, or ::Initialize() will not return
    driverDir_ = "/usr/local/etc/andor/";
 #endif
 
@@ -314,8 +309,7 @@ AndorCamera::~AndorCamera()
       // clear the instance pointer
       instance_ = 0;
    }
-
-#ifndef WIN32
+#ifdef __linux__
    if (hAndorDll) dlclose(hAndorDll);
 #endif
 }
@@ -782,32 +776,10 @@ int AndorCamera::GetListOfAvailableCameras()
       if (bSoftwareTriggerSupported_)
 	 fExposureSequence_.clear();
 
-      int InternalShutter;
-      ret = IsInternalMechanicalShutter(&InternalShutter);
-      if(InternalShutter == 0)
-         bShutterIntegrated_ = false;
-      else
-      {
-         bShutterIntegrated_ = true;
-         if(!HasProperty("InternalShutter"))
-         {
-            pAct = new CPropertyAction (this, &AndorCamera::OnInternalShutter);
-            nRet = CreateProperty("InternalShutter", g_ShutterMode_Open, MM::String, false, pAct);
-            assert(nRet == DEVICE_OK);
-         }
-
-         vector<string> shutterValues;
-         shutterValues.push_back(g_ShutterMode_Open);
-         shutterValues.push_back(g_ShutterMode_Closed);
-         nRet = SetAllowedValues("InternalShutter", shutterValues);
-         if (nRet != DEVICE_OK)
-            return nRet;
-         nRet = SetProperty("InternalShutter", shutterValues[0].c_str());
-         if (nRet != DEVICE_OK)
-            return nRet;
-      }
-      int ShutterMode = 1;  //0: auto, 1: open, 2: close
-      ret = SetShutter(1, ShutterMode, 20,20);//Opened any way because some old AndorCamera has no flag for IsInternalMechanicalShutter
+      //Shutter
+      ret = createShutterProperty(&caps);
+      if(ret != DRV_SUCCESS)
+         return ret;
 
 
       // readout mode
@@ -1121,7 +1093,7 @@ int AndorCamera::GetListOfAvailableCameras()
       if(!HasProperty(MM::g_Keyword_ActualInterval_ms))
       {
          pAct = new CPropertyAction (this, &AndorCamera::OnActualIntervalMS);
-         nRet = CreateProperty(MM::g_Keyword_ActualInterval_ms, "0.0", MM::Float, false, pAct);
+         nRet = CreateProperty(MM::g_Keyword_ActualInterval_ms, "0.0", MM::String, true, pAct);
       }
       else
       {
@@ -1347,12 +1319,6 @@ int AndorCamera::GetListOfAvailableCameras()
       if (nRet != DEVICE_OK)
          return nRet;
 
-      if(bShutterIntegrated_)
-      {
-         nRet = SetProperty("InternalShutter", g_ShutterMode_Open);
-         if (nRet != DEVICE_OK)
-            return nRet;
-      }
       if(mb_canSetTemp) {
          nRet = SetProperty(MM::g_Keyword_CCDTemperatureSetPoint, strTempSetPoint.c_str());
          if (nRet != DEVICE_OK) {
@@ -1406,7 +1372,12 @@ int AndorCamera::GetListOfAvailableCameras()
             return (int)ret;
          }
       }
-      GetReadoutTime();
+
+       
+
+      nRet = UpdateTimings();
+      if (nRet != DRV_SUCCESS)
+         return nRet;
 
       nRet = UpdateStatus();
       if (nRet != DEVICE_OK)
@@ -1492,14 +1463,17 @@ int AndorCamera::GetListOfAvailableCameras()
          {
             SetIsolatedCropMode(0, currentCropHeight_, currentCropWidth_, 1, 1);
             SetImage(binSize_, binSize_, roi_.x+1, roi_.x+roi_.xSize, roi_.y+1, roi_.y+roi_.ySize);
-            GetReadoutTime(); 
-            if (iCurrentTriggerMode_ == SOFTWARE || iCurrentTriggerMode_ == EXTERNAL)
+            ret = UpdateTimings(); 
+            if (ret != DRV_SUCCESS)
+                  return ret;
+
+            if (INTERNAL != iCurrentTriggerMode_)
             {
                ret = StartAcquisition();
                if (ret != DRV_SUCCESS)
                   return ret;
             }
-            else // iCurrentTriggerMode_ == INTERNAL
+            else
             {
                PrepareAcquisition();
             }
@@ -1526,7 +1500,7 @@ int AndorCamera::GetListOfAvailableCameras()
 
          if(iCurrentTriggerMode_ == SOFTWARE) 
          {
-            /* int ret = */ PrepareSnap();
+            /* int ret = */ //PrepareSnap();
             SendSoftwareTrigger();
          }
          else if (iCurrentTriggerMode_ == INTERNAL) 
@@ -1589,53 +1563,80 @@ int AndorCamera::GetListOfAvailableCameras()
    /**
    * Readout time
    */ 
-   long AndorCamera::GetReadoutTime()
+   unsigned int AndorCamera::UpdateTimings()
    {
+      unsigned int ret;
+      float fReadOutTime,fKeepCleanTime, fAccumTime, fExposure, fKinetic;
+      
+      //Workaround until Andor bug #7705 is fixed
+      //ret = GetReadOutTime(&fReadOutTime);
+      //if(DRV_SUCCESS!=ret)
+      //   return ret;
+      
+      //ret = GetKeepCleanTime(&fKeepCleanTime);
+      //if(DRV_NOT_AVAILABLE == ret)
+      //{
+      //   fKeepCleanTime=0.000f; 
+      //}
+      //else if(DRV_SUCCESS!=ret)
+      //   return ret; */
 
-      at_32 ReadoutTime;
-      float fReadoutTime;
-      if(fpGetReadOutTime!=0 && (iCurrentTriggerMode_ == SOFTWARE))
+      //fReadOutTime is readout+keepclean time, neglect fKeepCleanTime until bug fix
+      SetExposureTime(0.f);
+      ret = GetAcquisitionTimings(&fExposure,&fAccumTime,&fReadOutTime);
+      SetExposureTime(expMs_/1000.f);
+      fKeepCleanTime=0.000f; 
+     
+
+      //convert to ms
+      
+      fReadOutTime *= 1000.f;
+      fKeepCleanTime *= 1000.f;
+
+      ReadoutTime_ = static_cast<long>(fReadOutTime);
+      KeepCleanTime_ = static_cast<long>(fKeepCleanTime);
+
+      
+      
+      ret = GetAcquisitionTimings(&fExposure,&fAccumTime,&fKinetic);
+      if(DRV_SUCCESS!=ret)
+        return ret;
+
+      bool externalMode = EXTERNAL == iCurrentTriggerMode_ || EXTERNALEXPOSURE == iCurrentTriggerMode_ || FASTEXTERNAL == iCurrentTriggerMode_;
+      
+      if(externalMode) //calculate minimum period
       {
-         fpGetReadOutTime(&fReadoutTime);
-         ReadoutTime = long(fReadoutTime * 1000);
+         if(EXTERNALEXPOSURE == iCurrentTriggerMode_||bFrameTransfer_)
+         {
+            fExposure = 0.f; //set by trigger pulse
+         }
+
+         if(FASTEXTERNAL == iCurrentTriggerMode_)
+         {
+            fKeepCleanTime = 0.f;
+         }
+
+         ActualInterval_ms_ = fExposure*1000.f + fKeepCleanTime + fReadOutTime;
+
       }
-      else
+      else //actual period
       {
-         unsigned ret = SetExposureTime(0.0);
-         if (DRV_SUCCESS != ret)
-            return (int)ret;
-         float fExposure, fAccumTime, fKineticTime;
-         GetAcquisitionTimings(&fExposure,&fAccumTime,&fKineticTime);
-         ReadoutTime = long(fKineticTime * 1000.0);
-         ret = SetExposureTime((float)(expMs_ / 1000.0));
-         if (DRV_SUCCESS != ret)
-            return (int)ret;
+         ActualInterval_ms_ = fKinetic*1000.f;
       }
-      if(ReadoutTime<=0)
-         ReadoutTime=35;
-      ReadoutTime_ = ReadoutTime;
 
-      float fExposure, fAccumTime, fKineticTime;
-      GetAcquisitionTimings(&fExposure,&fAccumTime,&fKineticTime);
-      ActualInterval_ms_ = fKineticTime * 1000.0f;
-      SetProperty(MM::g_Keyword_ActualInterval_ms, CDeviceUtils::ConvertToString(ActualInterval_ms_)); 
-
-      //whenever readout needs update, keepcleantime also needs update
-      at_32 KeepCleanTime;
-      float fKeepCleanTime;
-      if(fpGetKeepCleanTime!=0 && (iCurrentTriggerMode_ == SOFTWARE))
+      ActualInterval_ms_str_ = CDeviceUtils::ConvertToString((double)ActualInterval_ms_) ;
+      if(externalMode)
       {
-         fpGetKeepCleanTime(&fKeepCleanTime);
-         KeepCleanTime = long(fKeepCleanTime * 1000);
+         
+         if(EXTERNALEXPOSURE == iCurrentTriggerMode_ && !bFrameTransfer_)
+         {
+            ActualInterval_ms_str_ += " + ExternalExposureTime";
+         }
+
+         ActualInterval_ms_str_ += " (minimum)";
       }
-      else
-         KeepCleanTime=10;
-      if(KeepCleanTime<=0)
-         KeepCleanTime=10;
-      KeepCleanTime_ = KeepCleanTime;
 
-
-      return ReadoutTime_;
+      return DRV_SUCCESS;
    }
 
 
@@ -1679,7 +1680,11 @@ int AndorCamera::GetListOfAvailableCameras()
          return uret;
       }
 
-      GetReadoutTime();
+      uret = UpdateTimings();
+      if (DRV_SUCCESS != uret)
+      {
+         return uret;
+      }
 
       int ret = ResizeImageBuffer();
       if (ret != DEVICE_OK)
@@ -1751,7 +1756,11 @@ int AndorCamera::GetListOfAvailableCameras()
          return uret;
 
 
-      GetReadoutTime();
+      uret = UpdateTimings();
+	    if (DRV_SUCCESS != uret)
+      {
+         return uret;
+      }
 
       int ret = ResizeImageBuffer();
       if (ret != DEVICE_OK)
@@ -1920,8 +1929,9 @@ int AndorCamera::GetListOfAvailableCameras()
             return aret;
          }
 
-         GetReadoutTime();
-
+         aret = UpdateTimings();
+         if(DRV_SUCCESS!=aret)
+            return aret;
 
          // apply new settings
          binSize_ = (int)bin;
@@ -2027,9 +2037,11 @@ int AndorCamera::GetListOfAvailableCameras()
                else
                {
                   HSSpeedIdx_ = i;
-                  GetReadoutTime();
+                  int retCode = UpdateTimings();
+                  if (DRV_SUCCESS != retCode)
+                     return retCode;
 
-                  int retCode = UpdatePreampGains();
+                  retCode = UpdatePreampGains();
                   if (DRV_SUCCESS != retCode)
                      return retCode;
 
@@ -2209,8 +2221,8 @@ int AndorCamera::GetListOfAvailableCameras()
          bool acquiring = sequenceRunning_;
          if (acquiring)
             StopSequenceAcquisition(true);
-
-		 DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
 
          if (sequenceRunning_)
             return ERR_BUSY_ACQUIRING;
@@ -2222,27 +2234,11 @@ int AndorCamera::GetListOfAvailableCameras()
 
          SetToIdle();
 
-         if(trigger == "Software")
-         {  
-            if (softwareTriggerUsed_)
-               return ERR_SOFTWARE_TRIGGER_IN_USE;
-            iCurrentTriggerMode_ = SOFTWARE;
-            softwareTriggerUsed_ = true;
-         }
-         else if(trigger == "External")
-         {
-            iCurrentTriggerMode_ = EXTERNAL;
-            if (strCurrentTriggerMode_ == "Software")
-               softwareTriggerUsed_ = false;
-         }
-         else
-         {
-            iCurrentTriggerMode_ = INTERNAL;
-            if (strCurrentTriggerMode_ == "Software")
-               softwareTriggerUsed_ = false;
-         }
 
+         iCurrentTriggerMode_= GetTriggerModeInt(trigger);
          strCurrentTriggerMode_ = trigger;
+         
+
 
          if (acquiring)
             StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
@@ -2448,7 +2444,9 @@ int AndorCamera::GetListOfAvailableCameras()
                   return (int)ret;
                else
                {
-                  GetReadoutTime();
+                  ret = UpdateTimings();
+                  if (DRV_SUCCESS != ret)
+                  return (int)ret;
                   if (acquiring)
                      StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
                   PrepareSnap();
@@ -2666,16 +2664,15 @@ int AndorCamera::GetListOfAvailableCameras()
    }
    // eof jizhen
 
-   int AndorCamera::OnInternalShutter(MM::PropertyBase* pProp, MM::ActionType eAct)
+   int AndorCamera::OnInternalShutterMode(MM::PropertyBase* pProp, MM::ActionType eAct)
    {
-      
       if (eAct == MM::AfterSet)
       {
          bool acquiring = sequenceRunning_;
          if (acquiring)
             StopSequenceAcquisition(true);
-
-		 DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
 
          if (sequenceRunning_)
             return ERR_BUSY_ACQUIRING;
@@ -2687,11 +2684,11 @@ int AndorCamera::GetListOfAvailableCameras()
          pProp->Get(mode);
          int modeIdx = 0;
          if (mode.compare(g_ShutterMode_Auto) == 0)
-            modeIdx = 0;
+            iInternalShutterMode_ = AUTO;
          else if (mode.compare(g_ShutterMode_Open) == 0)
-            modeIdx = 1;
+            iInternalShutterMode_ = OPEN;
          else if (mode.compare(g_ShutterMode_Closed) == 0)
-            modeIdx = 2;
+            iInternalShutterMode_ = CLOSED;
          else
             return DEVICE_INVALID_PROPERTY_VALUE;
 
@@ -2701,16 +2698,194 @@ int AndorCamera::GetListOfAvailableCameras()
          while (status == DRV_ACQUIRING && ret == DRV_SUCCESS)
             ret = GetStatus(&status);
 
-         // the first parameter in SetShutter, must be "1" in order for
-         // the shutter logic to work as described in the documentation
-         ret = SetShutter(1, modeIdx, 20,20);//0, 0);
+         ret = ApplyShutterSettings();
          if (ret != DRV_SUCCESS)
             return (int)ret;
 
          if (acquiring)
             StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
-         PrepareSnap();
 
+         PrepareSnap();
+      }
+      else if (eAct == MM::BeforeGet)
+      {
+      }
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::OnShutterMode(MM::PropertyBase* pProp, MM::ActionType eAct)
+   {
+      if (eAct == MM::AfterSet)
+      {
+         bool acquiring = sequenceRunning_;
+         if (acquiring)
+            StopSequenceAcquisition(true);
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+
+         if (sequenceRunning_)
+            return ERR_BUSY_ACQUIRING;
+
+         //added to use RTA
+         SetToIdle();
+
+         string mode;
+         pProp->Get(mode);
+         int modeIdx = 0;
+         if (mode.compare(g_ShutterMode_Auto) == 0)
+            iShutterMode_ = AUTO;
+         else if (mode.compare(g_ShutterMode_Open) == 0)
+            iShutterMode_ = OPEN;
+         else if (mode.compare(g_ShutterMode_Closed) == 0)
+            iShutterMode_ = CLOSED;
+         else
+            return DEVICE_INVALID_PROPERTY_VALUE;
+
+         // wait for camera to finish acquiring
+         int status = DRV_IDLE;
+         unsigned ret = GetStatus(&status);
+         while (status == DRV_ACQUIRING && ret == DRV_SUCCESS)
+            ret = GetStatus(&status);
+
+         ret = ApplyShutterSettings();
+         if (ret != DRV_SUCCESS)
+            return (int)ret;
+
+         if (acquiring)
+            StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
+
+         PrepareSnap();
+      }
+      else if (eAct == MM::BeforeGet)
+      {
+      }
+      return DEVICE_OK;
+   }
+   
+   int AndorCamera::OnShutterOpeningTime(MM::PropertyBase* pProp, MM::ActionType eAct)
+   {
+      if (eAct == MM::AfterSet)
+      {
+         bool acquiring = sequenceRunning_;
+         if (acquiring)
+            StopSequenceAcquisition(true);
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+
+         if (sequenceRunning_)
+            return ERR_BUSY_ACQUIRING;
+
+         //added to use RTA
+         SetToIdle();
+
+         long time;
+         pProp->Get(time);
+
+         iShutterOpeningTime_ = static_cast <int> (time);
+
+         // wait for camera to finish acquiring
+         int status = DRV_IDLE;
+         unsigned ret = GetStatus(&status);
+         while (status == DRV_ACQUIRING && ret == DRV_SUCCESS)
+            ret = GetStatus(&status);
+
+         ret = ApplyShutterSettings();
+         if (ret != DRV_SUCCESS)
+            return ret;
+
+         if (acquiring)
+            StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
+
+         PrepareSnap();
+      }
+      else if (eAct == MM::BeforeGet)
+      {
+      }
+      return DEVICE_OK;
+   }
+
+    int AndorCamera::OnShutterTTL(MM::PropertyBase* pProp, MM::ActionType eAct)
+   {
+      if (eAct == MM::AfterSet)
+      {
+         bool acquiring = sequenceRunning_;
+         if (acquiring)
+            StopSequenceAcquisition(true);
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+
+         if (sequenceRunning_)
+            return ERR_BUSY_ACQUIRING;
+
+         //added to use RTA
+         SetToIdle();
+
+         string mode;
+         pProp->Get(mode);
+         int modeIdx = 0;
+         if (mode.compare(g_ShutterTTLHighToOpen) == 0)
+            iShutterTTL_ = 1;
+         else if (mode.compare(g_ShutterTTLLowToOpen) == 0)
+            iShutterTTL_ = 0;
+         else
+            return DEVICE_INVALID_PROPERTY_VALUE;
+
+         // wait for camera to finish acquiring
+         int status = DRV_IDLE;
+         unsigned ret = GetStatus(&status);
+         while (status == DRV_ACQUIRING && ret == DRV_SUCCESS)
+            ret = GetStatus(&status);
+
+         ret = ApplyShutterSettings();
+         if (ret != DRV_SUCCESS)
+            return (int)ret;
+
+         if (acquiring)
+            StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
+
+         PrepareSnap();
+      }
+      else if (eAct == MM::BeforeGet)
+      {
+      }
+      return DEVICE_OK;
+   }
+
+   int AndorCamera::OnShutterClosingTime(MM::PropertyBase* pProp, MM::ActionType eAct)
+   {
+      if (eAct == MM::AfterSet)
+      {
+         bool acquiring = sequenceRunning_;
+         if (acquiring)
+            StopSequenceAcquisition(true);
+         
+         DriverGuard dg(this); //moved driver guard to here to allow AcqSequenceThread to terminate properly
+
+         if (sequenceRunning_)
+            return ERR_BUSY_ACQUIRING;
+
+         //added to use RTA
+         SetToIdle();
+
+         long time;
+         pProp->Get(time);
+
+         iShutterClosingTime_ = static_cast <int> (time);
+
+         // wait for camera to finish acquiring
+         int status = DRV_IDLE;
+         unsigned ret = GetStatus(&status);
+         while (status == DRV_ACQUIRING && ret == DRV_SUCCESS)
+            ret = GetStatus(&status);
+
+         ret = ApplyShutterSettings();
+         if (ret != DRV_SUCCESS)
+            return ret;
+
+         if (acquiring)
+            StartSequenceAcquisition(sequenceLength_ - imageCounter_, intervalMs_, stopOnOverflow_);
+
+         PrepareSnap();
       }
       else if (eAct == MM::BeforeGet)
       {
@@ -2719,7 +2894,10 @@ int AndorCamera::GetListOfAvailableCameras()
    }
 
    
-int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType eAct)
+
+
+
+   int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType eAct)
    {
       if (eAct == MM::AfterSet)
       { 
@@ -3132,18 +3310,9 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
    */
    int AndorCamera::OnActualIntervalMS(MM::PropertyBase* pProp, MM::ActionType eAct)
    {
-      if (eAct == MM::AfterSet)
+      if (eAct == MM::BeforeGet)
       {
-         double ActualInvertal_ms;
-         pProp->Get(ActualInvertal_ms);
-         if(ActualInvertal_ms == ActualInterval_ms_)
-            return DEVICE_OK;
-         pProp->Set(ActualInvertal_ms);
-         ActualInterval_ms_ = (float)ActualInvertal_ms;
-      }
-      else if (eAct == MM::BeforeGet)
-      {
-         pProp->Set(CDeviceUtils::ConvertToString(ActualInterval_ms_));
+         pProp->Set(ActualInterval_ms_str_.c_str());
       }
       return DEVICE_OK;
    }
@@ -3540,7 +3709,7 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
       if (ret == DRV_SUCCESS)
          SetProperty(MM::g_Keyword_ReadoutMode,readoutModes_[HSSpeedIdx_].c_str());
 
-      GetReadoutTime();
+      UpdateTimings();
 
    }
 
@@ -3873,21 +4042,29 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
       {
          SetToIdle();
       }
- 
+
+      ostringstream os;
+
+      os << "Started sequence acquisition: " << numImages << "images  at " << interval_ms << " ms" << endl;
+      LogMessage(os.str().c_str());
+
+      LogMessage("Setting DMA Parameters", true);
+      int imagesPerDma = 64;
+      if(imagesPerDma>numImages)
+         imagesPerDma=numImages;
+
       // Limit number of images per DMA to sequence length in-case we're using external trig
-      int ret = SetDMAParameters(numImages, 0.001f);
+      int ret = SetDMAParameters(imagesPerDma, 0.001f);
       if (DRV_SUCCESS != ret)
          return (int)ret;
       
 
       LogMessage("Setting Trigger Mode", true);
       int ret0;
-      if (iCurrentTriggerMode_ == SOFTWARE)
-         ret0 = SetTriggerMode(0);  //set internal trigger for sequence acquisition. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
+      ret0 = ApplyTriggerMode(SOFTWARE == iCurrentTriggerMode_ ? INTERNAL : iCurrentTriggerMode_);
+      if(DRV_SUCCESS!=ret0)
+         return ret0;
 
-      ostringstream os;
-      os << "Started sequence acquisition: " << numImages << "images  at " << interval_ms << " ms" << endl;
-      LogMessage(os.str().c_str());
 
       // prepare the camera
       ret = SetAcquisitionMode(5); // run till abort
@@ -3920,6 +4097,7 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
          return ret;
       }
       LogMessage("Set Number of accumulations to 1", true);
+
 
       ret = SetKineticCycleTime((float)(interval_ms / 1000.0));
       if (ret != DRV_SUCCESS)
@@ -3976,14 +4154,11 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
       LogMessage(os.str().c_str(), true);
       seqThread_->SetLength(numImages);
 
-      float fExposure, fAccumTime, fKineticTime;
-      GetAcquisitionTimings(&fExposure,&fAccumTime,&fKineticTime);
-      SetProperty(MM::g_Keyword_ActualInterval_ms, CDeviceUtils::ConvertToString((double)fKineticTime * 1000.0)); 
-      ActualInterval_ms_ = fKineticTime * 1000.0f;
-      os.str("");
-      os << "Exposure: " << fExposure << " AcummTime: " << fAccumTime << " KineticTime: " << fKineticTime;
-      LogMessage(os.str().c_str());
-
+      ret = UpdateTimings();
+      if (DRV_SUCCESS != ret)
+      {
+         return ret;
+      }
       seqThread_->SetWaitTime((at_32) (ActualInterval_ms_ / 5));
       seqThread_->SetTimeOut(imageTimeOut_ms_);
 
@@ -4426,7 +4601,9 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
 			/* unsigned aret = */ SetImage(binSize_, binSize_, roi_.x+1, roi_.x+roi_.xSize,
 			roi_.y+1, roi_.y+roi_.ySize);
 
-			GetReadoutTime();
+			ret = UpdateTimings();
+			if (DRV_SUCCESS != ret)
+				return (int)ret;
 
 			ResizeImageBuffer();
 
@@ -4509,7 +4686,9 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
          /* unsigned aret = */ SetImage(binSize_, binSize_, roi_.x+1, roi_.x+roi_.xSize,
             roi_.y+1, roi_.y+roi_.ySize);
 
-         GetReadoutTime();
+         ret = UpdateTimings();
+         if (DRV_SUCCESS != ret)
+            return (int)ret;
 
          ResizeImageBuffer();
 
@@ -4582,7 +4761,9 @@ int AndorCamera::OnSpuriousNoiseFilter(MM::PropertyBase* pProp, MM::ActionType e
          SetImage(1, 1, roi_.x+1, roi_.x+roi_.xSize,
             roi_.y+1, roi_.y+roi_.ySize);
 
-         GetReadoutTime();
+         ret = UpdateTimings();
+         if (DRV_SUCCESS != ret)
+            return (int)ret;
 
          ResizeImageBuffer();
 
@@ -4629,23 +4810,168 @@ unsigned int AndorCamera::createIsolatedCropModeProperty(AndorCapabilities * cap
   return ret;
 }
 
-   unsigned int AndorCamera::createTriggerProperty(AndorCapabilities * caps) {
-      DriverGuard dg(this);
-      vTriggerModes.clear();  
-      unsigned int retVal = DRV_SUCCESS;
-      if(caps->ulTriggerModes & AC_TRIGGERMODE_CONTINUOUS)
-      {
-         if(iCurrentTriggerMode_ == SOFTWARE) {
-            retVal = SetTriggerMode(10);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
+
+   unsigned int AndorCamera::AddTriggerProperty(int mode)
+   {
+      unsigned int retVal;
+       if(iCurrentTriggerMode_ == mode) 
+         {
+            retVal = ApplyTriggerMode(mode);
             if (retVal != DRV_SUCCESS)
             {
                ShutDown();
-               LogMessage("Could not set trigger mode");
+               string s;
+               s="Could not set \""+GetTriggerModeString(mode)+"\" trigger mode";
+               LogMessage(s);
                return retVal;
             }
-            strCurrentTriggerMode_ = "Software";
+            strCurrentTriggerMode_ = GetTriggerModeString(mode);
          }
-         vTriggerModes.push_back("Software");
+         vTriggerModes.push_back(GetTriggerModeString(mode));
+         return DRV_SUCCESS;
+   }
+
+
+   unsigned int AndorCamera::createShutterProperty(AndorCapabilities * caps)
+   {
+      unsigned int ret = DRV_SUCCESS;
+      int mechShut=0;
+      bool propertyCreated = false;
+      ret = IsInternalMechanicalShutter(&mechShut);
+      iShutterMode_ = OPEN;
+      iInternalShutterMode_=OPEN;
+      iShutterOpeningTime_ = 20;
+      iShutterClosingTime_ = 20;
+      iShutterTTL_ = 1;
+
+      int minOpeningTime, minClosingTime;
+
+      ret = GetShutterMinTimes(&minClosingTime, &minOpeningTime); 
+      if(DRV_SUCCESS!=ret)
+        return ret;
+      if(iShutterOpeningTime_ < minOpeningTime) {
+        iShutterOpeningTime_ = minOpeningTime;
+      }
+      if(iShutterClosingTime_ < minClosingTime) {
+        iShutterClosingTime_ = minClosingTime;
+      }
+      
+
+      vector<string> shutterValues;
+      shutterValues.push_back(g_ShutterMode_Open);
+      shutterValues.push_back(g_ShutterMode_Closed);
+      shutterValues.push_back(g_ShutterMode_Auto);
+
+      bool externalCapability = caps->ulFeatures & AC_FEATURES_SHUTTEREX;
+      bool internalCapability = caps->ulFeatures & AC_FEATURES_SHUTTER;
+
+      if(externalCapability)
+      {
+         bShuttersIndependant_ = true;
+         propertyCreated = true;
+         if(!HasProperty(g_ExternalShutterMode))
+         {
+            CPropertyAction *pAct = new CPropertyAction (this, &AndorCamera::OnShutterMode);
+            ret = CreateProperty(g_ExternalShutterMode, g_ShutterMode_Open, MM::String, false, pAct);
+            assert(ret == DEVICE_OK);
+         }
+         
+         ret = SetAllowedValues(g_ExternalShutterMode, shutterValues);
+         if (ret != DEVICE_OK)
+            return ret;
+
+         if(!HasProperty(g_InternalShutterMode))
+         {
+            CPropertyAction *pAct = new CPropertyAction (this, &AndorCamera::OnInternalShutterMode);
+            ret = CreateProperty(g_InternalShutterMode, g_ShutterMode_Open, MM::String, false, pAct);
+            assert(ret == DEVICE_OK);
+         }
+
+         ret = SetAllowedValues(g_InternalShutterMode, shutterValues);
+         if (ret != DEVICE_OK)
+            return ret;
+
+      }
+      else if(internalCapability )//single shutter control
+      {
+         propertyCreated = true;
+         bShuttersIndependant_ = false;
+         if(!HasProperty(g_InternalShutterMode))
+         {
+            CPropertyAction *pAct = new CPropertyAction (this, &AndorCamera::OnShutterMode);
+            ret = CreateProperty(g_ShutterMode, g_ShutterMode_Open, MM::String, false, pAct);
+            assert(ret == DEVICE_OK);
+         }
+         ret = SetAllowedValues(g_ShutterMode, shutterValues);
+         if (ret != DEVICE_OK)
+            return ret;
+      }
+
+      if(propertyCreated)
+      {
+         if(!HasProperty(g_ShutterModeOpeningTime))
+         {
+            CPropertyAction *pAct = new CPropertyAction (this, &AndorCamera::OnShutterOpeningTime);
+            ret = CreateProperty(g_ShutterModeOpeningTime, CDeviceUtils::ConvertToString(iShutterOpeningTime_), MM::Integer, false, pAct);
+            if (ret != DEVICE_OK)
+               return ret;
+         }
+
+         if(!HasProperty(g_ShutterModeClosingTime))
+         {
+            CPropertyAction *pAct  = new CPropertyAction (this, &AndorCamera::OnShutterClosingTime);
+            ret = CreateProperty(g_ShutterModeClosingTime, CDeviceUtils::ConvertToString(iShutterClosingTime_), MM::Integer, false, pAct);
+            if (ret != DEVICE_OK)
+               return ret;
+         }
+
+         if(0==mechShut&&!HasProperty(g_ShutterTTL))
+         {
+            vector<string> ttlValues;
+            ttlValues.push_back(g_ShutterTTLHighToOpen);
+            ttlValues.push_back(g_ShutterTTLLowToOpen);
+
+            CPropertyAction *pAct  = new CPropertyAction (this, &AndorCamera::OnShutterTTL);
+            ret = CreateProperty(g_ShutterTTL, g_ShutterTTLHighToOpen, MM::String, false, pAct);
+            if (ret != DEVICE_OK)
+               return ret;
+
+            ret = SetAllowedValues(g_ShutterTTL, ttlValues);
+            if (ret != DEVICE_OK)
+              return ret;
+         }
+
+      }
+
+      if(internalCapability || externalCapability)
+      {
+         //initialise and apply settings
+         ret = ApplyShutterSettings();
+      }
+      return ret;
+   }
+
+
+   unsigned int AndorCamera::createTriggerProperty(AndorCapabilities * caps) 
+   {
+      DriverGuard dg(this);
+      vTriggerModes.clear();  
+      unsigned int retVal = DRV_SUCCESS;
+      if(caps->ulTriggerModes & AC_TRIGGERMODE_INTERNAL)
+      { 
+         retVal = AddTriggerProperty(INTERNAL);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
+      }
+      if(caps->ulTriggerModes & AC_TRIGGERMODE_CONTINUOUS)
+      {
+         retVal = AddTriggerProperty(SOFTWARE);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
          bSoftwareTriggerSupported_ = true;
 	 int number;
 	 retVal = GetMaximumNumberRingExposureTimes(&number);
@@ -4657,33 +4983,38 @@ unsigned int AndorCamera::createIsolatedCropModeProperty(AndorCapabilities * cap
 	    LogMessage("Exposure sequencing not supported");
 	 }
       }
+      if(caps->ulTriggerModes & AC_TRIGGERMODE_EXTERNAL) 
+      {
+         retVal = AddTriggerProperty(EXTERNAL);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
+         retVal = AddTriggerProperty(FASTEXTERNAL);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
+      }
+      
+      if(caps->ulTriggerModes & AC_TRIGGERMODE_EXTERNALEXPOSURE) 
+      {
+         retVal = AddTriggerProperty(EXTERNALEXPOSURE);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
+      }
+      if(caps->ulTriggerModes & AC_TRIGGERMODE_EXTERNALSTART)
+      {
+         retVal = AddTriggerProperty(EXTERNALSTART);
+         if (retVal != DRV_SUCCESS)
+         {
+            return retVal;
+         }
+      }
 
-      if(caps->ulTriggerModes & AC_TRIGGERMODE_EXTERNAL) {
-         if(iCurrentTriggerMode_ == EXTERNAL) {
-            retVal = SetTriggerMode(1);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
-            if (retVal != DRV_SUCCESS)
-            {
-               ShutDown();
-               LogMessage("Could not set external trigger mode");
-               return retVal;
-            }
-            strCurrentTriggerMode_ = "External";
-         }
-         vTriggerModes.push_back("External");
-      }
-      if(caps->ulTriggerModes & AC_TRIGGERMODE_INTERNAL) {
-         if(iCurrentTriggerMode_ == INTERNAL) {
-            retVal = SetTriggerMode(0);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
-            if (retVal != DRV_SUCCESS)
-            {
-               ShutDown();
-               LogMessage("Could not set software trigger mode");
-               return retVal;
-            }
-            strCurrentTriggerMode_ = "Internal";
-         }
-         vTriggerModes.push_back("Internal");
-      }
+
       if(!HasProperty("Trigger"))
       {
          CPropertyAction *pAct = new CPropertyAction (this, &AndorCamera::OnSelectTrigger);
@@ -4701,40 +5032,104 @@ unsigned int AndorCamera::createIsolatedCropModeProperty(AndorCapabilities * cap
       return retVal;
    }
 
+   int AndorCamera::GetTriggerModeInt(string mode)
+   {
+      if(g_Internal == mode)
+         return INTERNAL;
+      else if(g_External == mode)
+         return EXTERNAL;
+      else if(g_ExternalExposure == mode)
+         return EXTERNALEXPOSURE;
+      else if(g_ExternalStart == mode)
+         return EXTERNALSTART;
+      else if(g_Software == mode)
+         return SOFTWARE;
+      else if(g_FastExternal == mode)
+         return FASTEXTERNAL;
+      
+      return -1;
+   }
+
+   string AndorCamera::GetTriggerModeString(int mode)
+   {
+      string s;
+      if(INTERNAL== mode)
+         s = g_Internal;
+      else if(EXTERNAL == mode)
+         s = g_External;
+      else if(EXTERNALEXPOSURE == mode)
+         s = g_ExternalExposure;
+      else if(EXTERNALSTART == mode)
+         s = g_ExternalStart;
+      else if(SOFTWARE == mode)
+         s = g_Software;
+      else if(FASTEXTERNAL == mode)
+         s = g_FastExternal;
+      else
+         s = "Unknown Trigger Mode!";
+      return s;
+   }
+
+   unsigned int AndorCamera::ApplyTriggerMode(int mode)
+   {
+      int actualmode = mode;
+      int fastmode = 0;
+      unsigned int ret;
+
+      if(FASTEXTERNAL == mode)
+      {
+         actualmode = EXTERNAL;
+         fastmode=1;
+      }
+
+      ret = SetTriggerMode(actualmode);
+      if(DRV_SUCCESS!=ret)
+         return ret;
+
+      ret = SetFastExtTrigger(fastmode);
+      return ret;
+   }
+
+   unsigned int AndorCamera::ApplyShutterSettings()
+   {
+      unsigned int ret;
+      if(bShuttersIndependant_)
+      {
+         ret = SetShutterEx(iShutterTTL_, iInternalShutterMode_, iShutterClosingTime_, iShutterOpeningTime_,iShutterMode_);
+      }
+      else
+      {
+         ret = SetShutter(iShutterTTL_, iShutterMode_, iShutterClosingTime_,iShutterOpeningTime_);
+      }
+      if(DRV_P2INVALID == ret) return ERR_INVALID_SHUTTER_MODE;
+      if(DRV_P3INVALID == ret) return ERR_INVALID_SHUTTER_OPENTIME;
+      if(DRV_P4INVALID == ret) return ERR_INVALID_SHUTTER_CLOSETIME;
+      if(DRV_P5INVALID == ret) return ERR_INVALID_SHUTTER_MODE;
+      return ret;
+   }
 
    unsigned int AndorCamera::UpdateSnapTriggerMode()
    {
       DriverGuard dg(this);
-      int ret;
+      int actualMode= iCurrentTriggerMode_;
+      int acqMode = 1; //single scan
+      unsigned int ret;
 
-      if(iCurrentTriggerMode_ == SOFTWARE)
+     
+      if(EXTERNALSTART==actualMode)
       {
-         ret = SetTriggerMode(10);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
-         //if (ret != DRV_SUCCESS) //not check to allow call of AcqFinished
-         //  return ret;
-         ret = SetAcquisitionMode(5);//set RTA non-iCam camera
-         //if (ret != DRV_SUCCESS)
-         //  return ret;
+         actualMode = EXTERNAL;
       }
-      else if(iCurrentTriggerMode_ == EXTERNAL)
-      {
-         ret = SetTriggerMode(1);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
-         //if (ret != DRV_SUCCESS)
-         //  return ret;
-         ret = SetAcquisitionMode(5);//set SingleScan non-iCam camera
-         //if (ret != DRV_SUCCESS)
-         //  return ret;
-      }
-      else
-      {
-         ret = SetTriggerMode(0);  //set software trigger. mode 0:internal, 1: ext, 6:ext start, 7:bulb, 10:software
-         //if (ret != DRV_SUCCESS)
-         //  return ret;
-         ret = SetAcquisitionMode(1);//set SingleScan non-iCam camera
-         //if (ret != DRV_SUCCESS)
-         //  return ret;
-      }
-      return ret;
+
+      ret = ApplyTriggerMode(actualMode);
+      if(DRV_SUCCESS != ret)
+         return ret;
+
+      ret = SetAcquisitionMode(acqMode);
+      if(DRV_SUCCESS != ret)
+         return ret;
+
+      return DRV_SUCCESS;
    }
 
 

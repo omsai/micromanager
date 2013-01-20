@@ -61,6 +61,9 @@
 #define ERR_OPEN_OR_CLOSE_SHUTTER_IN_ACQUISITION_NOT_ALLOWEDD 110
 #define ERR_NO_AVAIL_AMPS 111
 #define ERR_SOFTWARE_TRIGGER_IN_USE 112
+#define ERR_INVALID_SHUTTER_OPENTIME 113
+#define ERR_INVALID_SHUTTER_CLOSETIME 114
+#define ERR_INVALID_SHUTTER_MODE 115
 
 class AcqSequenceThread;
  
@@ -136,7 +139,8 @@ public:
    int OnOffset(MM::PropertyBase* pProp, MM::ActionType eAct);
    int OnTemperature(MM::PropertyBase* pProp, MM::ActionType eAct);
    int OnDriverDir(MM::PropertyBase* pProp, MM::ActionType eAct);
-   //int OnShutterMode(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnShutterMode(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnInternalShutterMode(MM::PropertyBase* pProp, MM::ActionType eAct);
    int OnCooler(MM::PropertyBase* pProp, MM::ActionType eAct);// jizhen 05.11.2007
    int OnFanMode(MM::PropertyBase* pProp, MM::ActionType eAct);// jizhen 05.16.2007
    int OnTemperatureSetPoint(MM::PropertyBase* pProp, MM::ActionType eAct);// Daigang 23-May-2007  
@@ -145,8 +149,10 @@ public:
    int OnPreAmpGain(MM::PropertyBase* pProp, MM::ActionType eAct);// Daigang 24-May-2007  
    int OnFrameTransfer(MM::PropertyBase* pProp, MM::ActionType eAct); 
    int OnVSpeed(MM::PropertyBase* pProp, MM::ActionType eAct);  
-   int OnInternalShutter(MM::PropertyBase* pProp, MM::ActionType eAct);  
-   int OnOutputAmplifier(MM::PropertyBase* pProp, MM::ActionType eAct);  
+   int OnShutterOpeningTime(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnShutterClosingTime(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnShutterTTL(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnOutputAmplifier(MM::PropertyBase* pProp, MM::ActionType eAct); 
    int OnADChannel(MM::PropertyBase* pProp, MM::ActionType eAct);
    int OnCamera(MM::PropertyBase* pProp, MM::ActionType eAct);//for multiple camera support
    int OnCameraName(MM::PropertyBase* pProp, MM::ActionType eAct);
@@ -192,7 +198,9 @@ private:
    void LogStatus();
 	int PrepareSnap();
 	unsigned int UpdateSnapTriggerMode();
-
+   std::string GetTriggerModeString(int mode);
+   unsigned int ApplyTriggerMode(int mode);
+   int GetTriggerModeInt(std::string mode);
 
    bool EMSwitch_;
 
@@ -200,7 +208,6 @@ private:
 
    static AndorCamera* instance_;
    static unsigned refCount_;
-   static bool softwareTriggerUsed_;
    ImgBuffer img_;
    bool initialized_;
    bool snapInProgress_;
@@ -233,24 +240,12 @@ private:
 
    long ReadoutTime_, KeepCleanTime_;
 
-   long GetReadoutTime();
+   unsigned int UpdateTimings();
+   unsigned int ApplyShutterSettings();
 
-// kdb 2/27/2009
-#ifdef WIN32
-   HMODULE hAndorDll;
-   typedef unsigned int (CALLBACK *FPGetReadOutTime)(float *_fReadoutTime);
-   typedef unsigned int (CALLBACK *FPGetKeepCleanTime)(float *_ftime);
-#else   
+#ifdef __linux__
    HDEVMODULE hAndorDll; 
-   typedef unsigned int (*FPGetReadOutTime)(float *_fReadoutTime);
-   typedef unsigned int (*FPGetKeepCleanTime)(float *_ftime);
 #endif
-// end of kdb
-   FPGetReadOutTime fpGetReadOutTime;
-   //typedef unsigned int (CALLBACK *FPGetKeepCleanTime)(float *_ftime);
-   FPGetKeepCleanTime fpGetKeepCleanTime;
-   //typedef unsigned int (CALLBACK *FPSendSoftwareTrigger)();
-   //FPSendSoftwareTrigger fpSendSoftwareTrigger;
 
    bool busy_;
 
@@ -284,7 +279,7 @@ private:
 
    AcqSequenceThread* seqThread_;
 
-   bool bShutterIntegrated_;
+   bool bShuttersIndependant_;
    int ADChannelIndex_, OutputAmplifierIndex_;
    void UpdateHSSpeeds();
    int UpdateExposureFromCamera();
@@ -298,14 +293,29 @@ private:
    int  iCurrentTriggerMode_;
 
    enum {
-	   INTERNAL,
-	   EXTERNAL,
-	   SOFTWARE
+      INTERNAL=0,
+      EXTERNAL=1,
+      EXTERNALSTART=6,
+      EXTERNALEXPOSURE=7,
+      SOFTWARE=10,
+      FASTEXTERNAL=101
+   };
+
+   enum {
+      AUTO=0,
+      OPEN=1,
+      CLOSED=2
    };
 
    bool bRingOfExposuresSupported_;
    int maxRingExposures_;
    std::vector<float> fExposureSequence_;
+
+   int iInternalShutterMode_;
+   int iShutterMode_;
+   int iShutterOpeningTime_;
+   int iShutterClosingTime_;
+   int iShutterTTL_;
 
    at_32 myCameraID_;
    at_32 NumberOfAvailableCameras_;
@@ -326,7 +336,7 @@ private:
    std::vector<std::string> BaselineClampValues_;
    std::string BaselineClampValue_;
    float ActualInterval_ms_;
-
+   std::string ActualInterval_ms_str_;
    std::string strCurrentTriggerMode_;
    std::vector<std::string> vTriggerModes;
 
@@ -338,6 +348,7 @@ private:
    std::vector<std::string> vChannels;
 
    bool bFrameTransfer_;
+   
 
    std::string m_str_frameTransferProp;
    std::string m_str_camType;
@@ -348,6 +359,8 @@ private:
    std::string getCameraType();
    unsigned int createGainProperty(AndorCapabilities * caps);
    unsigned int createTriggerProperty(AndorCapabilities * caps);
+   unsigned int createShutterProperty(AndorCapabilities * caps);
+   unsigned int AddTriggerProperty(int mode);
    unsigned int createIsolatedCropModeProperty(AndorCapabilities * caps);
 
    bool mb_canUseFan;

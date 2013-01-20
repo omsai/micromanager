@@ -234,6 +234,10 @@ CDemoCamera::CDemoCamera() :
    roiX_(0),
    roiY_(0),
    sequenceStartTime_(0),
+   isSequenceable_(false),
+   sequenceMaxLength_(100),
+   sequenceRunning_(false),
+   sequenceIndex_(0),
 	binSize_(1),
 	cameraCCDXSize_(512),
 	cameraCCDYSize_(512),
@@ -242,7 +246,8 @@ CDemoCamera::CDemoCamera() :
    pDemoResourceLock_(0),
    triggerDevice_(""),
 	dropPixels_(false),
-	saturatePixels_(false),
+   fastImage_(false),
+   saturatePixels_(false),
 	fractionOfPixelsToDropOrSaturate_(0.002)
 {
    memset(testProperty_,0,sizeof(testProperty_));
@@ -451,9 +456,21 @@ int CDemoCamera::Initialize()
    AddAllowedValue("SaturatePixels", "0");
    AddAllowedValue("SaturatePixels", "1");
 
+   pAct = new CPropertyAction (this, &CDemoCamera::OnFastImage);
+	CreateProperty("FastImage", "0", MM::Integer, false, pAct);
+   AddAllowedValue("FastImage", "0");
+   AddAllowedValue("FastImage", "1");
+
    pAct = new CPropertyAction (this, &CDemoCamera::OnFractionOfPixelsToDropOrSaturate);
 	CreateProperty("FractionOfPixelsToDropOrSaturate", "0.002", MM::Float, false, pAct);
 	SetPropertyLimits("FractionOfPixelsToDropOrSaturate", 0., 0.1);
+
+   // Whether or not to use exposure time sequencing
+   pAct = new CPropertyAction (this, &CDemoCamera::OnIsSequenceable);
+   std::string propName = "UseExposureSequences";
+   CreateProperty(propName.c_str(), "No", MM::String, false, pAct);
+   AddAllowedValue(propName.c_str(), "Yes");
+   AddAllowedValue(propName.c_str(), "No");
 
    // synchronize all properties
    // --------------------------
@@ -521,6 +538,10 @@ int CDemoCamera::SnapImage()
 
    MM::MMTime startTime = GetCurrentMMTime();
    double exp = GetExposure();
+   if (sequenceRunning_ && IsCapturing()) 
+   {
+      exp = GetSequenceExposure();
+   }
    double expUs = exp * 1000.0;
    GenerateSyntheticImage(img_, exp);
 
@@ -729,6 +750,25 @@ double CDemoCamera::GetExposure() const
 }
 
 /**
+ * Returns the current exposure from a sequence and increases the sequence counter
+ * Used for exposure sequences
+ */
+double CDemoCamera::GetSequenceExposure() 
+{
+   if (exposureSequence_.size() == 0) 
+      return 0.0;
+   if (sequenceIndex_ > exposureSequence_.size() - 1)
+      sequenceIndex_ = 0;
+   double exposure = exposureSequence_[sequenceIndex_];
+   sequenceIndex_++;
+   if (sequenceIndex_ >= exposureSequence_.size())
+   {
+      sequenceIndex_ = 0;
+   }
+   return exposure;
+}
+
+/**
 * Sets exposure in milliseconds.
 * Required by the MM::Camera API.
 */
@@ -766,6 +806,24 @@ int CDemoCamera::SetBinning(int binF)
       return SIMULATED_ERROR;
 
    return SetProperty(MM::g_Keyword_Binning, CDeviceUtils::ConvertToString(binF));
+}
+
+/**
+ * Clears the list of exposures used in sequences
+ */
+int CDemoCamera::ClearExposureSequence()
+{
+   exposureSequence_.clear();
+   return DEVICE_OK;
+}
+
+/**
+ * Adds an exposure to a list of exposures used in sequences
+ */
+int CDemoCamera::AddToExposureSequence(double exposureTime_ms) 
+{
+   exposureSequence_.push_back(exposureTime_ms);
+   return DEVICE_OK;
 }
 
 int CDemoCamera::SetAllowedBinning() 
@@ -880,7 +938,12 @@ int CDemoCamera::InsertImage()
 
    MMThreadGuard g(imgPixelsLock_);
 
-   const unsigned char* pI = GetImageBuffer();
+   const unsigned char* pI;
+   if (!fastImage_) {
+      pI = GetImageBuffer();
+   } else {
+      pI = img_.GetPixels();
+   }
    unsigned int w = GetImageWidth();
    unsigned int h = GetImageHeight();
    unsigned int b = GetImageBytesPerPixel();
@@ -917,7 +980,11 @@ int CDemoCamera::ThreadRun (void)
       }
    }
    
-   ret = SnapImage();
+   if (!fastImage_) {
+      ret = SnapImage();
+   } else {
+      ret = DEVICE_OK;
+   }
    if (ret != DEVICE_OK)
    {
       return ret;
@@ -1349,6 +1416,26 @@ int CDemoCamera::OnDropPixels(MM::PropertyBase* pProp, MM::ActionType eAct)
    return DEVICE_OK;
 }
 
+int CDemoCamera::OnFastImage(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+   DemoHub* pHub = static_cast<DemoHub*>(GetParentHub());
+   if (pHub && pHub->GenerateRandomError())
+      return SIMULATED_ERROR;
+
+   if (eAct == MM::AfterSet)
+   {
+      long tvalue = 0;
+      pProp->Get(tvalue);
+		fastImage_ = (0==tvalue)?false:true;
+   }
+   else if (eAct == MM::BeforeGet)
+   {
+      pProp->Set(fastImage_?1L:0L);
+   }
+
+   return DEVICE_OK;
+}
+
 int CDemoCamera::OnSaturatePixels(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
    DemoHub* pHub = static_cast<DemoHub*>(GetParentHub());
@@ -1499,6 +1586,31 @@ int CDemoCamera::OnCCDTemp(MM::PropertyBase* pProp, MM::ActionType eAct)
    }
    return DEVICE_OK;
 }
+
+int CDemoCamera::OnIsSequenceable(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+   std::string val = "Yes";
+   if (eAct == MM::BeforeGet)
+   {
+      if (!isSequenceable_) 
+      {
+         val = "No";
+      }
+      pProp->Set(val.c_str());
+   }
+   else if (eAct == MM::AfterSet)
+   {
+      isSequenceable_ = false;
+      pProp->Get(val);
+      if (val == "Yes") 
+      {
+         isSequenceable_ = true;
+      }
+   }
+
+   return DEVICE_OK;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // Private CDemoCamera methods

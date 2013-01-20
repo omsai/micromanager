@@ -39,22 +39,6 @@
 #include <map>
 #include "atcore++.h"
 
-//using namespace andor;
-
-#define NO_CIRCLE_BUFFER_FRAMES  10
-
-//////////////////////////////////////////////////////////////////////////////
-// Error codes
-//
-#define ERR_UNKNOWN_MODE         102
-#define ERR_UNKNOWN_POSITION     103
-#define ERR_IN_SEQUENCE          104
-#define ERR_SEQUENCE_INACTIVE    105
-
-
-//////////////////////////////////////////////////////////////////////////////
-// CAndorSDK3Camera class
-//////////////////////////////////////////////////////////////////////////////
 
 class MySequenceThread;
 namespace andor {
@@ -78,6 +62,13 @@ class TAndorFloatValueMapper;
 class TAndorFloatHolder;
 class TAndorEnumValueMapper;
 class TTriggerRemapper;
+class CEventsManager;
+
+
+//////////////////////////////////////////////////////////////////////////////
+// CAndorSDK3Camera class
+//////////////////////////////////////////////////////////////////////////////
+
 
 class CAndorSDK3Camera : public CCameraBase<CAndorSDK3Camera>  
 {
@@ -131,9 +122,10 @@ public:
 
 private:
    void PerformReleaseVersionCheck();
-   void UnpackDataWithPadding(unsigned char* _pucSrcBuffer);
-   void InitialiseDeviceCircularBuffer();
    void InitialiseSDK3Defaults();
+   void UnpackDataWithPadding(unsigned char* _pucSrcBuffer);
+   bool InitialiseDeviceCircularBuffer(const unsigned numBuffers);
+   bool CleanUpDeviceCircularBuffer();
 
    static const double nominalPixelSizeUm_;
    static const int CID_FPGA_TICKS = 1;
@@ -155,9 +147,12 @@ private:
    bool keep_trying_;
    bool in_external_;
    double timeout_;
+   unsigned int currentSeqExposure_;
 
    unsigned char** image_buffers_;
+   unsigned int numImgBuffersAllocated_;
 
+   bool b_eventsSupported_;
    bool b_cameraPresent_;
 
    int GetNumberOfDevicesPresent() { return number_of_devices_; };
@@ -207,6 +202,8 @@ private:
    andor::IEnum* triggerMode_Enum;
    TAndorEnumValueMapper* triggerMode_valueMapper;
    TTriggerRemapper* triggerMode_remapper;
+
+   CEventsManager* eventsManager_;
 };
 
 class MySequenceThread : public MMDeviceThreadBase
